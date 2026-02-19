@@ -419,7 +419,6 @@ let build_minimal_tiff ~width ~height ~samples_per_pixel ~bits_per_sample
   Tiff.Byte_order.set_uint32 order buf 4 ifd_offset;
   (* IFD entry count *)
   Tiff.Byte_order.set_uint16 order buf ifd_offset num_entries;
-  let ext_pos = ref (ifd_offset + ifd_size) in
   let write_entry idx tag typ count value =
     let off = ifd_offset + 2 + idx * 12 in
     Tiff.Byte_order.set_uint16 order buf off tag;
@@ -427,7 +426,7 @@ let build_minimal_tiff ~width ~height ~samples_per_pixel ~bits_per_sample
     Tiff.Byte_order.set_uint32 order buf (off + 4) count;
     Tiff.Byte_order.set_uint32 order buf (off + 8) value
   in
-  let write_entry_shorts idx tag arr =
+  let write_entry_shorts ext_pos idx tag arr =
     let off = ifd_offset + 2 + idx * 12 in
     let count = Array.length arr in
     Tiff.Byte_order.set_uint16 order buf off tag;
@@ -436,13 +435,14 @@ let build_minimal_tiff ~width ~height ~samples_per_pixel ~bits_per_sample
     if count * 2 <= 4 then begin
       for j = 0 to count - 1 do
         Tiff.Byte_order.set_uint16 order buf (off + 8 + j * 2) arr.(j)
-      done
-    end else begin
-      Tiff.Byte_order.set_uint32 order buf (off + 8) !ext_pos;
-      for j = 0 to count - 1 do
-        Tiff.Byte_order.set_uint16 order buf (!ext_pos + j * 2) arr.(j)
       done;
-      ext_pos := !ext_pos + count * 2
+      ext_pos
+    end else begin
+      Tiff.Byte_order.set_uint32 order buf (off + 8) ext_pos;
+      for j = 0 to count - 1 do
+        Tiff.Byte_order.set_uint16 order buf (ext_pos + j * 2) arr.(j)
+      done;
+      ext_pos + count * 2
     end
   in
   (* Entries must be sorted by tag *)
@@ -451,7 +451,8 @@ let build_minimal_tiff ~width ~height ~samples_per_pixel ~bits_per_sample
      273=StripOffsets, 279=StripByteCounts, 339=SampleFormat *)
   write_entry 0 Tiff.Tags.image_width Tiff.Tags.type_long 1 width;
   write_entry 1 Tiff.Tags.image_length Tiff.Tags.type_long 1 height;
-  write_entry_shorts 2 Tiff.Tags.bits_per_sample bps_array;
+  let ext_pos = ifd_offset + ifd_size in
+  let ext_pos = write_entry_shorts ext_pos 2 Tiff.Tags.bits_per_sample bps_array in
   write_entry 3 Tiff.Tags.compression Tiff.Tags.type_short 1 Tiff.Tags.compression_none;
   write_entry 4 Tiff.Tags.photometric_interpretation Tiff.Tags.type_short 1
     (if samples_per_pixel >= 3 then Tiff.Tags.photometric_rgb
@@ -460,7 +461,7 @@ let build_minimal_tiff ~width ~height ~samples_per_pixel ~bits_per_sample
   write_entry 6 Tiff.Tags.samples_per_pixel Tiff.Tags.type_short 1 samples_per_pixel;
   write_entry 7 Tiff.Tags.rows_per_strip Tiff.Tags.type_long 1 height;
   write_entry 8 Tiff.Tags.strip_byte_counts Tiff.Tags.type_long 1 data_size;
-  write_entry_shorts 9 Tiff.Tags.sample_format sf_array;
+  let _ext_pos = write_entry_shorts ext_pos 9 Tiff.Tags.sample_format sf_array in
   (* Next IFD = 0 *)
   let next_off = ifd_offset + 2 + num_entries * 12 in
   Tiff.Byte_order.set_uint32 order buf next_off 0;

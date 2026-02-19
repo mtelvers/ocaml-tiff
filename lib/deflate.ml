@@ -88,12 +88,17 @@ let build_huffman_table lengths n_symbols =
       counts.(lengths.(i)) <- counts.(lengths.(i)) + 1
   done;
   let offsets = Array.make (max_bits + 1) 0 in
-  let total = ref 0 in
-  for i = 1 to max_bits do
-    offsets.(i) <- !total;
-    total := !total + counts.(i)
-  done;
-  let symbols = Array.make !total 0 in
+  let total =
+    let rec loop i acc =
+      if i > max_bits then acc
+      else begin
+        offsets.(i) <- acc;
+        loop (i + 1) (acc + counts.(i))
+      end
+    in
+    loop 1 0
+  in
+  let symbols = Array.make total 0 in
   for i = 0 to n_symbols - 1 do
     if lengths.(i) > 0 then begin
       symbols.(offsets.(lengths.(i))) <- i;
@@ -102,11 +107,17 @@ let build_huffman_table lengths n_symbols =
   done;
   let lookup = Array.make (1 lsl lk_bits) 0 in
   let next_code = Array.make (max_bits + 1) 0 in
-  let code = ref 0 in
-  for bits = 1 to max_bits do
-    code := (!code + counts.(bits - 1)) lsl 1;
-    next_code.(bits) <- !code
-  done;
+  let () =
+    let rec loop bits code =
+      if bits > max_bits then ()
+      else begin
+        let code = (code + counts.(bits - 1)) lsl 1 in
+        next_code.(bits) <- code;
+        loop (bits + 1) code
+      end
+    in
+    loop 1 0
+  in
   for i = 0 to n_symbols - 1 do
     let len = lengths.(i) in
     if len > 0 then begin
@@ -341,11 +352,17 @@ let build_codes lengths n =
       bl_count.(lengths.(i)) <- bl_count.(lengths.(i)) + 1
   done;
   let next_code = Array.make (max_bits + 1) 0 in
-  let code = ref 0 in
-  for bits = 1 to max_bits do
-    code := (!code + bl_count.(bits - 1)) lsl 1;
-    next_code.(bits) <- !code
-  done;
+  let () =
+    let rec loop bits code =
+      if bits > max_bits then ()
+      else begin
+        let code = (code + bl_count.(bits - 1)) lsl 1 in
+        next_code.(bits) <- code;
+        loop (bits + 1) code
+      end
+    in
+    loop 1 0
+  in
   let codes = Array.make n 0 in
   for i = 0 to n - 1 do
     let len = lengths.(i) in
@@ -408,33 +425,26 @@ let hash3 buf pos len =
 
 let find_match buf pos len head prev max_match_len =
   let max_dist = 32768 in
-  let best_len = ref 2 in
-  let best_dist = ref 0 in
-  let chain_len = ref 0 in
+  let rec count_match mlen m max_l =
+    if mlen < max_l &&
+       Bytes.get_uint8 buf (pos + mlen) = Bytes.get_uint8 buf (m + mlen)
+    then count_match (mlen + 1) m max_l
+    else mlen
+  in
   let h = hash3 buf pos len in
-  let m = ref head.(h) in
-  while !m >= 0 && !chain_len < max_chain_length && pos - !m <= max_dist do
-    let mlen = ref 0 in
-    let max_l = min max_match_len (min (len - pos) (len - !m)) in
-    while !mlen < max_l &&
-          Bytes.get_uint8 buf (pos + !mlen) = Bytes.get_uint8 buf (!m + !mlen) do
-      mlen := !mlen + 1
-    done;
-    if !mlen > !best_len then begin
-      best_len := !mlen;
-      best_dist := pos - !m;
-      if !best_len >= max_match_len then
-        m := -1
-      else begin
-        chain_len := !chain_len + 1;
-        m := prev.(!m land (max_dist - 1))
-      end
-    end else begin
-      chain_len := !chain_len + 1;
-      m := prev.(!m land (max_dist - 1))
-    end
-  done;
-  (!best_len, !best_dist)
+  let rec search m chain_len best_len best_dist =
+    if m < 0 || chain_len >= max_chain_length || pos - m > max_dist then
+      (best_len, best_dist)
+    else
+      let max_l = min max_match_len (min (len - pos) (len - m)) in
+      let mlen = count_match 0 m max_l in
+      if mlen > best_len then begin
+        if mlen >= max_match_len then (mlen, pos - m)
+        else search (prev.(m land (max_dist - 1))) (chain_len + 1) mlen (pos - m)
+      end else
+        search (prev.(m land (max_dist - 1))) (chain_len + 1) best_len best_dist
+  in
+  search head.(h) 0 2 0
 
 let deflate_fixed data =
   let len = Bytes.length data in
@@ -452,43 +462,45 @@ let deflate_fixed data =
   end else begin
     let head = Array.make hash_size (-1) in
     let prev = Array.make 32768 (-1) in
-    let pos = ref 0 in
-    while !pos < len do
-      let max_match = min 258 (len - !pos) in
-      if max_match >= 3 then begin
-        let mlen, mdist = find_match data !pos len head prev max_match in
-        if mlen >= 3 then begin
-          let lcode = find_length_code mlen + 257 in
-          write_litlen lcode;
-          let lextra = length_extra.(lcode - 257) in
-          if lextra > 0 then
-            write_bits w (mlen - length_base.(lcode - 257)) lextra;
-          let dcode = find_dist_code mdist in
-          write_dist dcode;
-          let dextra = dist_extra.(dcode) in
-          if dextra > 0 then
-            write_bits w (mdist - dist_base.(dcode)) dextra;
-          for i = 0 to mlen - 1 do
-            let p = !pos + i in
-            if p + 2 < len then begin
-              let h = hash3 data p len in
-              prev.(p land 32767) <- head.(h);
-              head.(h) <- p
-            end
-          done;
-          pos := !pos + mlen
+    let rec compress_loop pos =
+      if pos >= len then ()
+      else
+        let max_match = min 258 (len - pos) in
+        if max_match >= 3 then begin
+          let mlen, mdist = find_match data pos len head prev max_match in
+          if mlen >= 3 then begin
+            let lcode = find_length_code mlen + 257 in
+            write_litlen lcode;
+            let lextra = length_extra.(lcode - 257) in
+            if lextra > 0 then
+              write_bits w (mlen - length_base.(lcode - 257)) lextra;
+            let dcode = find_dist_code mdist in
+            write_dist dcode;
+            let dextra = dist_extra.(dcode) in
+            if dextra > 0 then
+              write_bits w (mdist - dist_base.(dcode)) dextra;
+            for i = 0 to mlen - 1 do
+              let p = pos + i in
+              if p + 2 < len then begin
+                let h = hash3 data p len in
+                prev.(p land 32767) <- head.(h);
+                head.(h) <- p
+              end
+            done;
+            compress_loop (pos + mlen)
+          end else begin
+            let h = hash3 data pos len in
+            prev.(pos land 32767) <- head.(h);
+            head.(h) <- pos;
+            write_litlen (Bytes.get_uint8 data pos);
+            compress_loop (pos + 1)
+          end
         end else begin
-          let h = hash3 data !pos len in
-          prev.(!pos land 32767) <- head.(h);
-          head.(h) <- !pos;
-          write_litlen (Bytes.get_uint8 data !pos);
-          pos := !pos + 1
+          write_litlen (Bytes.get_uint8 data pos);
+          compress_loop (pos + 1)
         end
-      end else begin
-        write_litlen (Bytes.get_uint8 data !pos);
-        pos := !pos + 1
-      end
-    done;
+    in
+    compress_loop 0;
     write_litlen 256
   end;
   flush_bits w;
