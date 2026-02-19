@@ -1,0 +1,6 @@
+(library
+ (name tiff)
+ (public_name tiff)
+ (libraries bigarray)
+ (modules tiff byte_order ifd tags compression packbits lzw deflate predict
+  strips tiles color sample geokeys geotransform icc_tiff))

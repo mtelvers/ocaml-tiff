@@ -1,0 +1,4 @@
+(executable
+ (name tiff_info)
+ (public_name tiff_info)
+ (libraries tiff))

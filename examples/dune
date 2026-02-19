@@ -1,0 +1,3 @@
+(executable
+ (name tiff_demo)
+ (libraries tiff))
